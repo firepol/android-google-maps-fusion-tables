@@ -12,6 +12,9 @@
     <!--https://developer.android.com/training/location/retrieve-current.html-->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
+    <!--http://stackoverflow.com/questions/34639890/google-drive-api-the-name-must-not-be-empty-null-but-i-had-passed-valid-acco-->
+    <uses-permission android:name="android.permission.GET_ACCOUNTS" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"

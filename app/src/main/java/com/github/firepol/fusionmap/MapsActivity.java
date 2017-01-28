@@ -19,6 +19,18 @@ import com.google.android.gms.maps.OnMapReadyCallback;
 import com.google.android.gms.maps.SupportMapFragment;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.MarkerOptions;
+import com.google.api.client.extensions.android.http.AndroidHttp;
+import com.google.api.client.googleapis.extensions.android.gms.auth.GoogleAccountCredential;
+import com.google.api.client.http.HttpTransport;
+import com.google.api.client.json.JsonFactory;
+import com.google.api.client.json.gson.GsonFactory;
+import com.google.api.services.fusiontables.Fusiontables;
+import com.google.api.services.fusiontables.FusiontablesScopes;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
 public class MapsActivity extends FragmentActivity
         implements OnMapReadyCallback, ConnectionCallbacks, OnConnectionFailedListener {
@@ -30,6 +42,13 @@ public class MapsActivity extends FragmentActivity
     private GoogleMap mMap;
     private Location mLastLocation;
 
+    // Google API client stuff
+    final HttpTransport transport = AndroidHttp.newCompatibleTransport();
+    final JsonFactory jsonFactory = GsonFactory.getDefaultInstance();
+
+    GoogleAccountCredential credential;
+    Fusiontables client;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -40,6 +59,8 @@ public class MapsActivity extends FragmentActivity
         mapFragment.getMapAsync(this);
 
         buildGoogleApiClient();
+
+        prepareFusion();
     }
 
 
@@ -56,6 +77,41 @@ public class MapsActivity extends FragmentActivity
         }
     }
 
+
+    protected void prepareFusion() {
+        // Normally READONLY should be enough (see credential with one scope), but I checked online a console
+        // and I could see a public table only if I would grant both permissions
+        List<String> scopes = new ArrayList<>(Arrays.asList(FusiontablesScopes.FUSIONTABLES, FusiontablesScopes.FUSIONTABLES_READONLY));
+        credential = GoogleAccountCredential.usingOAuth2(this, scopes);
+        //credential = GoogleAccountCredential.usingOAuth2(this, Collections.singleton(FusiontablesScopes.FUSIONTABLES_READONLY));
+
+        // TODO : get account name automatically
+        // http://stackoverflow.com/questions/35789071/getting-the-gmail-id-of-the-user-in-android-6-0-marshmallow
+        credential.setSelectedAccountName("YOUR_GOOGLE_ACCOUNT");
+
+        // Calendar client
+        client = new Fusiontables.Builder(
+                transport, jsonFactory, credential).setApplicationName("TestMap/1.0")
+                .build();
+
+        try {
+            String tableId = "1774o_WcrqSQlepLXlz1kgH_01NpCJ-6OyId9Pm1J";
+
+            Fusiontables.Query.Sql sql = client.query().sql("SELECT FileName,Name,Location FROM " + tableId);
+            //sql.execute();
+            //java.lang.IllegalStateException: Calling this from your main thread can lead to deadlock
+
+            Fusiontables.Table.Get table = client.table().get(tableId);
+            table.setFields("items(FileName,Name,Location)");
+            //table.execute();
+
+            // TODO : can't execute like this on main thread as the documentation example "suggests"
+            //https://developers.google.com/api-client-library/java/google-api-java-client/android
+
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
 
     private boolean fetchLocation() {
 
@@ -99,6 +155,8 @@ public class MapsActivity extends FragmentActivity
         mMap.addMarker(new MarkerOptions().position(mDefaultLatLng).title("Zurich Oerlikon"));
         mMap.animateCamera(CameraUpdateFactory.newLatLngZoom(
                 mDefaultLatLng, 13));
+
+        // TODO: add fusion tables POIs
     }
 
 
