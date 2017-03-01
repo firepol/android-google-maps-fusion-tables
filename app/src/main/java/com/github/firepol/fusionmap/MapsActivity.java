@@ -2,9 +2,10 @@ package com.github.firepol.fusionmap;
 
 import android.content.pm.PackageManager;
 import android.location.Location;
+import android.os.AsyncTask;
+import android.os.Bundle;
 import android.support.v4.app.ActivityCompat;
 import android.support.v4.app.FragmentActivity;
-import android.os.Bundle;
 import android.util.Log;
 import android.widget.Toast;
 
@@ -20,17 +21,20 @@ import com.google.android.gms.maps.SupportMapFragment;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.MarkerOptions;
 import com.google.api.client.extensions.android.http.AndroidHttp;
-import com.google.api.client.googleapis.extensions.android.gms.auth.GoogleAccountCredential;
+import com.google.api.client.googleapis.auth.oauth2.GoogleCredential;
 import com.google.api.client.http.HttpTransport;
 import com.google.api.client.json.JsonFactory;
 import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.services.fusiontables.Fusiontables;
 import com.google.api.services.fusiontables.FusiontablesScopes;
+import com.google.api.services.fusiontables.model.Sqlresponse;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Arrays;
+import java.io.InputStream;
+import java.math.BigDecimal;
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
 
 public class MapsActivity extends FragmentActivity
         implements OnMapReadyCallback, ConnectionCallbacks, OnConnectionFailedListener {
@@ -40,18 +44,21 @@ public class MapsActivity extends FragmentActivity
     private static final LatLng mDefaultLatLng = new LatLng(47.411497, 8.544184);
     private GoogleApiClient mGoogleApiClient;
     private GoogleMap mMap;
-    private Location mLastLocation;
+    private LatLng mLastLocation;
 
     // Google API client stuff
     final HttpTransport transport = AndroidHttp.newCompatibleTransport();
     final JsonFactory jsonFactory = GsonFactory.getDefaultInstance();
 
-    GoogleAccountCredential credential;
+    GoogleCredential credential;
     Fusiontables client;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        mLastLocation = new LatLng(mDefaultLatLng.latitude, mDefaultLatLng.longitude);
+
         setContentView(R.layout.activity_maps);
         // Obtain the SupportMapFragment and get notified when the map is ready to be used.
         SupportMapFragment mapFragment = (SupportMapFragment) getSupportFragmentManager()
@@ -59,8 +66,6 @@ public class MapsActivity extends FragmentActivity
         mapFragment.getMapAsync(this);
 
         buildGoogleApiClient();
-
-        prepareFusion();
     }
 
 
@@ -78,18 +83,19 @@ public class MapsActivity extends FragmentActivity
     }
 
 
-    protected void prepareFusion() {
-        // Normally READONLY should be enough (see credential with one scope), but I checked online a console
-        // and I could see a public table only if I would grant both permissions
-        List<String> scopes = new ArrayList<>(Arrays.asList(FusiontablesScopes.FUSIONTABLES, FusiontablesScopes.FUSIONTABLES_READONLY));
-        credential = GoogleAccountCredential.usingOAuth2(this, scopes);
-        //credential = GoogleAccountCredential.usingOAuth2(this, Collections.singleton(FusiontablesScopes.FUSIONTABLES_READONLY));
+    protected void populateMapFromFusionTables() {
+        // TODO: to mak credentialsJSON work, you need to browse to https://console.developers.google.com/iam-admin/serviceaccounts/
+        // create a service account with role "project > service account actor" (generate key), download the json file
+        // rename it to service_account_credentials.json and place it under app/res/raw/
+        InputStream credentialsJSON = getResources().openRawResource(getResources().getIdentifier("service_account_credentials", "raw", getPackageName()));
+        try {
+            credential = GoogleCredential
+                    .fromStream(credentialsJSON, transport, jsonFactory)
+                    .createScoped(Collections.singleton(FusiontablesScopes.FUSIONTABLES_READONLY));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
 
-        // TODO : get account name automatically
-        // http://stackoverflow.com/questions/35789071/getting-the-gmail-id-of-the-user-in-android-6-0-marshmallow
-        credential.setSelectedAccountName("YOUR_GOOGLE_ACCOUNT");
-
-        // Calendar client
         client = new Fusiontables.Builder(
                 transport, jsonFactory, credential).setApplicationName("TestMap/1.0")
                 .build();
@@ -97,21 +103,73 @@ public class MapsActivity extends FragmentActivity
         try {
             String tableId = "1774o_WcrqSQlepLXlz1kgH_01NpCJ-6OyId9Pm1J";
 
-            Fusiontables.Query.Sql sql = client.query().sql("SELECT FileName,Name,Location FROM " + tableId);
-            //sql.execute();
-            //java.lang.IllegalStateException: Calling this from your main thread can lead to deadlock
+            Sqlresponse result = null;
 
-            Fusiontables.Table.Get table = client.table().get(tableId);
-            table.setFields("items(FileName,Name,Location)");
-            //table.execute();
+            result = query(tableId);
 
-            // TODO : can't execute like this on main thread as the documentation example "suggests"
-            //https://developers.google.com/api-client-library/java/google-api-java-client/android
+            List<List<Object>> rows = result.getRows();
 
-        } catch (IOException e) {
+            Log.i(TAG, "Got " + rows.size() + " POIs from fusion tables.");
+
+            if (mMap != null) {
+
+                for (List<Object> poi : rows) {
+                    // id (fileName), name, latitude, longitude
+                    String id = (String) poi.get(0);
+                    String name = (String) poi.get(1);
+                    BigDecimal lat = (BigDecimal) poi.get(2);
+                    BigDecimal lon = (BigDecimal) poi.get(3);
+                    LatLng latLng = new LatLng(lat.doubleValue(), lon.doubleValue());
+
+                    mMap.addMarker(new MarkerOptions().position(latLng).title(name));
+                }
+
+            } else {
+                Log.i(TAG, "mMap is null, not placing markers.");
+            }
+
+        } catch (ExecutionException e) {
+            e.printStackTrace();
+        } catch (InterruptedException e) {
             e.printStackTrace();
         }
     }
+
+
+    protected Sqlresponse query(String q) throws ExecutionException, InterruptedException {
+        // Inspired from: https://github.com/digitalheir/fusion-tables-android/blob/master/src/com/google/fusiontables/ftclient/FtClient.java
+        // It instantiates a GetTableTask class, calls execute, which calls doInBackground
+        return new GetTableTask(client).execute(q).get();
+    }
+
+
+    protected class GetTableTask extends AsyncTask<String, Void, Sqlresponse> {
+        Fusiontables client;
+
+        public GetTableTask(Fusiontables client) {
+            this.client = client;
+        }
+
+        @Override
+        protected Sqlresponse doInBackground(String... params) {
+
+            String tableId = params[0];
+
+            Log.i(TAG, "doInBackground table id: " + tableId);
+
+            Sqlresponse sqlresponse = null;
+
+            try {
+                Fusiontables.Query.SqlGet sql = client.query().sqlGet("SELECT FileName, Name, Lat, Lon FROM " + tableId);
+                sqlresponse = sql.execute();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
+            return sqlresponse;
+        }
+    }
+
 
     private boolean fetchLocation() {
 
@@ -122,14 +180,16 @@ public class MapsActivity extends FragmentActivity
             return true;
         }
 
-        mLastLocation = LocationServices.FusedLocationApi.getLastLocation(mGoogleApiClient);
+        Location lastLocation = LocationServices.FusedLocationApi.getLastLocation(mGoogleApiClient);
 
-        if (mLastLocation != null) {
+        if (lastLocation != null) {
+            mLastLocation = new LatLng(lastLocation.getLatitude(), lastLocation.getLongitude());
             // This makes sense for an app full of POIs everywhere in the world
             // Else it's better to center the app on a specific area
             mMap.animateCamera(CameraUpdateFactory.newLatLngZoom(
-                    new LatLng(mLastLocation.getLatitude(), mLastLocation.getLongitude()), 12));
+                    new LatLng(mLastLocation.latitude, mLastLocation.longitude), 12));
         } else {
+            mLastLocation = new LatLng(mDefaultLatLng.latitude, mDefaultLatLng.longitude);
             Toast.makeText(this, "No location detected. Make sure location is enabled on the device.", Toast.LENGTH_LONG).show();
             mMap.animateCamera(CameraUpdateFactory.newLatLngZoom(
                     mDefaultLatLng, 7));
@@ -156,7 +216,7 @@ public class MapsActivity extends FragmentActivity
         mMap.animateCamera(CameraUpdateFactory.newLatLngZoom(
                 mDefaultLatLng, 13));
 
-        // TODO: add fusion tables POIs
+        populateMapFromFusionTables();
     }
 
 
